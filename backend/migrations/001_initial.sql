@@ -1,3 +1,7 @@
 -- Initial schema is applied idempotently by SQLAlchemy metadata.create_all.
 -- Authoritative models: src/models/entities.py (relations, dependencies, reports,
 -- audit_logs and users). Dependencies/report snapshots are persisted as MySQL JSON.
+-- 已存在的旧库由 src.config.database.ensure_schema() 幂等补列：
+--   ALTER TABLE reports ADD COLUMN run_token VARCHAR(64) NULL;
+--   ALTER TABLE reports ADD COLUMN updated_at DATETIME NULL;
+-- run_token 为每次执行的令牌，配合状态 CAS 保证取消后迟到执行者无法发布结果。

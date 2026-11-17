@@ -40,9 +40,19 @@ Python真算，MySQL保存草案/依赖与结果，Redis传递任务，独立wor
 4. 3NF合成：按最小覆盖左侧分组，删除被包含关系；若无关系含候选键，补入候选键关系。无依赖时保留全属性关系。
 5. 验证：精确生成F+在各分解关系上的投影，枚举局部候选键，逐非平凡投影依赖检查3NF；所有原始依赖须可由投影并集推出。tableau追赶法依据FD合并符号，出现全a符号行则无损，报告包含见证行、合并步骤与最终表。
 
-复合、循环、空决定项、无依赖均支持。不在任何RHS中的属性强制进入候选键。输入入队时冻结快照，后续修改不会改变已有报告。结果JSON含SHA256，固定输入应有固定输出。失败态包括引用关系外属性、重复/空属性、属性超过10、依赖超过64、队列错误；页面可恢复并重新执行。
+复合、循环、空决定项、无依赖均支持。不在任何RHS中的属性强制进入候选键。输入受理时冻结快照，后续修改不会改变已有报告；失败重试沿用同一快照，旧报告始终可查看。结果JSON含SHA256，固定输入固定输出，且数据库结果与 `/artifacts/report-<id>.json` 文件逐字节一致。失败态包括引用关系外属性、重复/空属性、属性超过10、依赖超过64。
 
-这是小型关系模型设计辅助工具，FD由人工提供，不能从脏数据自动推断业务规则；不连接生产数据或自动执行DDL。精确投影在10属性内有界，仍可能随依赖复杂度增加耗时。单worker串行队列，不带生产任务重试/崩溃续跑。
+### 任务恢复与取消语义
+
+枚举：queued（待执行）/running（执行中）/completed（已完成）/failed（失败）/cancelled（已取消）。
+
+- **队列故障保留受理**：入队以数据库为准，Redis 不可用时任务保持 `queued`（不假失败）；worker 每 5 秒对账，Redis 恢复后自动补投。LIST+SET 去重索引由 Lua 原子入队，重复投递不会产生重复执行。
+- **中断接回**：每个执行者持有 Redis NX 租约锁（30 秒 TTL，计算期间续约）。worker 停机后锁过期，对账把残留 `running` 重置为 `queued` 并重新投递，同一任务只生成一份报告。
+- **取消竞争**：计算耗时期间可取消；取消是数据库权威终态并清队列/租约。执行者迟到返回时按 `run_token` CAS 发布，令牌不匹配则丢弃结果并删除本次文件，绝不覆盖 `cancelled`。
+- **文件写入不显示假完成**：报告文件先写临时文件再 `os.replace` 原子替换，成功后才提交 `completed`；写入失败进入可恢复 `failed`。对账与导出时发现文件缺失/损坏，以数据库结果为准原子补写。
+- 前端任务页与证据页呈现「待执行 → 执行中 → 已完成 / 已取消 / 失败」全状态，写角色可取消活跃任务、对失败任务按原快照重试。
+
+这是小型关系模型设计辅助工具，FD由人工提供，不能从脏数据自动推断业务规则；不连接生产数据或自动执行DDL。精确投影在10属性内有界，仍可能随依赖复杂度增加耗时。单worker串行队列，带租约对账、崩溃续跑与取消语义（见「任务恢复与取消语义」）。
 
 ## 工程结构
 
@@ -56,9 +66,9 @@ Python真算，MySQL保存草案/依赖与结果，Redis传递任务，独立wor
 
 目录：`frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}`；`backend/src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}`；`backend/scripts/seed_demo.py`；`backend/migrations/001_initial.sql`。每核心实体贯穿模型/schema/service/route/API/store/page。组件table/badge/frame复用，hooks/session/feedback和utils/forms/html共用；request_id/errors双后端中间件。
 
-枚举：角色admin/operator/viewer、任务queued/running/completed/failed；前后端定义位于 `backend/src/constants/enums.py` 和 `frontend/src/constants/enums.js`，security/reports、frame/badge消费；worker持久化状态。
+枚举：角色admin/operator/viewer、任务queued/running/completed/failed/cancelled；前后端定义位于 `backend/src/constants/enums.py` 和 `frontend/src/constants/enums.js`，security/reports、frame/badge消费；worker以run_token令牌与租约锁持久化执行语义。
 
-环境变量见.env.example：COMPOSE_PROJECT_NAME、FRONTEND_PORT/BACKEND_PORT/DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO。默认密码仅本地演示，JWT8小时。seed按自然键只补缺失关系及初始依赖，不覆盖用户修改。schema由SQLAlchemy metadata.create_all初始化，无在线迁移引擎。
+环境变量见.env.example：COMPOSE_PROJECT_NAME、FRONTEND_PORT/BACKEND_PORT/DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO，另有可选 ARTIFACT_DIR（报告文件目录，默认/artifacts）、LEASE_SECONDS（执行者租约秒数，默认30）、RECONCILE_EVERY_SECONDS（对账周期，默认5）。默认密码仅本地演示，JWT8小时。seed按自然键只补缺失关系及初始依赖，不覆盖用户修改。schema由SQLAlchemy metadata.create_all初始化，旧库通过 `ensure_schema()` 幂等补列 run_token/updated_at，无在线迁移引擎。
 
 本地开发：Python3.11安装backend/requirements.txt，配置DATABASE_URL/REDIS_URL后从backend运行 `uvicorn src.main:app --reload`、`python -m src.worker`；前端用Nginx同源代理/api。5服务均有健康检查和健康依赖，数据库/Redis/worker产物为独立命名卷。停止清空：`docker compose down -v --remove-orphans`。
 

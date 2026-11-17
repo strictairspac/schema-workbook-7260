@@ -14,7 +14,10 @@ class Report(Base):
     __tablename__='reports'
     id=Column(Integer,primary_key=True);name=Column(String(120),nullable=False);relation_id=Column(Integer,ForeignKey('relations.id'),nullable=False)
     status=Column(String(20),nullable=False,default='queued');input_snapshot=Column(JSON,nullable=False);result=Column(JSON,nullable=True);error=Column(Text,nullable=True)
+    # 每次实际执行（含重试/中断接回）生成的执行令牌；终态发布与取消均按令牌校验，迟到执行者无法覆盖新状态。
+    run_token=Column(String(64),nullable=True)
     created_at=Column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    updated_at=Column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc),onupdate=lambda:datetime.now(timezone.utc))
 class Audit(Base):
     __tablename__='audit_logs'
     id=Column(Integer,primary_key=True);actor=Column(String(120),nullable=False);action=Column(String(160),nullable=False);created_at=Column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
